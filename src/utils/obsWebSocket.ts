@@ -1,4 +1,5 @@
 import { uint8ToBase64 } from './duckingMath';
+import { buildObsWsUrl, diagnoseObsWsFailure } from './localModel';
 
 export type ObsConnectionState =
   | 'disconnected'
@@ -19,8 +20,8 @@ async function sha256Base64(input: string): Promise<string> {
 
 /**
  * Real OBS WebSocket v5 client (OBS Studio 28+ built-in WebSocket Server).
- * Allows automatic remote muting/ducking of any OBS audio input source when
- * Gemini 3.8 Flash TTS translation audio plays.
+ * Supports ws:// and wss://, automatic 127.0.0.1 -> localhost fallback on HTTPS,
+ * SHA-256 challenge-response authentication, and actionable error diagnostics.
  */
 export class ObsWebSocketClient {
   private ws: WebSocket | null = null;
@@ -48,43 +49,112 @@ export class ObsWebSocketClient {
     host: string,
     port: number,
     password: string,
+    useTls = false,
   ): Promise<string[]> {
     this.disconnect();
-    this.setState('connecting', `Подключение к ws://${host}:${port}...`);
+    const isHttpsPage =
+      typeof window !== 'undefined' && window.location.protocol === 'https:';
+    const isInIframe =
+      typeof window !== 'undefined' && window.self !== window.top;
+
+    // On HTTPS pages, Chromium exempts ws://localhost from Mixed Content but often blocks ws://127.0.0.1.
+    const candidates: string[] = [buildObsWsUrl(host, port, useTls)];
+    if (
+      !useTls &&
+      host.trim() === '127.0.0.1' &&
+      !candidates.includes(`ws://localhost:${port}`)
+    ) {
+      candidates.push(`ws://localhost:${port}`);
+    }
+
+    let lastError = '';
+    for (let i = 0; i < candidates.length; i++) {
+      const wsUrl = candidates[i];
+      try {
+        return await this.connectSingle(wsUrl, password, {
+          host,
+          port,
+          useTls,
+          isHttpsPage,
+          isInIframe,
+        });
+      } catch (err) {
+        lastError = err instanceof Error ? err.message : String(err);
+        // If auth failed (4009), don't retry alternate host
+        if (lastError.includes('4009')) {
+          break;
+        }
+      }
+    }
+
+    this.setState('error', lastError);
+    throw new Error(lastError);
+  }
+
+  private connectSingle(
+    wsUrl: string,
+    password: string,
+    meta: {
+      host: string;
+      port: number;
+      useTls: boolean;
+      isHttpsPage: boolean;
+      isInIframe: boolean;
+    },
+  ): Promise<string[]> {
+    this.setState('connecting', `Подключение к ${wsUrl}…`);
 
     return new Promise((resolve, reject) => {
       let settled = false;
-      const ws = new WebSocket(`ws://${host}:${port}`);
+      let ws: WebSocket;
+      try {
+        ws = new WebSocket(wsUrl);
+      } catch {
+        const msg = diagnoseObsWsFailure({
+          ...meta,
+          isSecurityError: true,
+        });
+        reject(new Error(msg));
+        return;
+      }
       this.ws = ws;
 
       const fail = (msg: string) => {
         if (!settled) {
           settled = true;
-          this.setState('error', msg);
           reject(new Error(msg));
         }
       };
 
       const timeout = window.setTimeout(() => {
-        ws.close();
+        try {
+          ws.close();
+        } catch {
+          // Ignore
+        }
         fail(
-          'Таймаут подключения к OBS WebSocket. Убедитесь, что OBS Studio запущен и сервер WebSocket включён (Инструменты → Настройки сервера WebSocket).',
+          diagnoseObsWsFailure({
+            ...meta,
+            closeCode: 1006,
+          }),
         );
-      }, 4500);
+      }, 4000);
 
       ws.onerror = () => {
-        window.clearTimeout(timeout);
-        fail(
-          'Не удалось подключиться к OBS WebSocket. Проверьте порт 4455 и убедитесь, что OBS запущен локально.',
-        );
+        // Wait briefly for onclose to deliver exact closeCode (e.g. 4009 vs 1006)
       };
 
-      ws.onclose = () => {
+      ws.onclose = (ev) => {
         window.clearTimeout(timeout);
         if (this.state === 'connected') {
           this.setState('disconnected', 'Соединение с OBS закрыто.');
         } else if (!settled) {
-          fail('OBS WebSocket отклонил соединение.');
+          fail(
+            diagnoseObsWsFailure({
+              ...meta,
+              closeCode: ev.code,
+            }),
+          );
         }
         for (const [, p] of this.pending) {
           p.reject(new Error('Соединение с OBS закрыто'));
@@ -120,7 +190,7 @@ export class ObsWebSocketClient {
           if (op === 2) {
             window.clearTimeout(timeout);
             settled = true;
-            this.setState('connected', 'Подключено к OBS Studio WebSocket v5');
+            this.setState('connected', `Подключено к OBS Studio (${wsUrl})`);
             try {
               const inputs = await this.getInputNames();
               resolve(inputs);

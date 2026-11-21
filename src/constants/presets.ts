@@ -1,6 +1,10 @@
 import type {
+  CameraConfig,
+  CameraFilterMode,
   DuckingConfig,
   LanguageOption,
+  LocalModelConfig,
+  LocalModelProtocol,
   ObsOverlayConfig,
   ObsWebSocketConfig,
   TranscriptEntry,
@@ -112,19 +116,97 @@ export const DEFAULT_DUCKING_CONFIG: DuckingConfig = {
   streamingTts: true,
 };
 
+export const DEFAULT_LOCAL_MODEL_CONFIG: LocalModelConfig = {
+  provider: 'gemini',
+  protocol: 'ollama',
+  transport: 'browser_direct',
+  baseUrl: 'http://localhost:11434',
+  modelName: 'qwen2.5:7b',
+  apiKey: '',
+  fallbackToGemini: false,
+};
+
+export const LOCAL_MODEL_PRESETS: {
+  label: string;
+  protocol: LocalModelProtocol;
+  baseUrl: string;
+  modelName: string;
+}[] = [
+  {
+    label: 'Ollama',
+    protocol: 'ollama',
+    baseUrl: 'http://localhost:11434',
+    modelName: 'qwen2.5:7b',
+  },
+  {
+    label: 'LM Studio',
+    protocol: 'openai',
+    baseUrl: 'http://localhost:1234',
+    modelName: 'local-model',
+  },
+  {
+    label: 'llama.cpp / vLLM',
+    protocol: 'openai',
+    baseUrl: 'http://localhost:8080',
+    modelName: 'qwen2.5-7b-instruct',
+  },
+];
+
+export const DEFAULT_CAMERA_CONFIG: CameraConfig = {
+  deviceId: '',
+  resolution: '720p',
+  fps: 30,
+  mirror: false,
+  filter: 'none',
+  sendVisionToGemini: true,
+  sendVideoToObs: false,
+};
+
+export const CAMERA_FILTERS: {
+  id: CameraFilterMode;
+  label: string;
+  cssFilter: string;
+}[] = [
+  { id: 'none', label: 'Оригинал', cssFilter: 'none' },
+  {
+    id: 'studio',
+    label: 'Студийный',
+    cssFilter: 'contrast(1.14) saturate(1.12) brightness(1.03)',
+  },
+  {
+    id: 'cool',
+    label: 'Холодный эфир',
+    cssFilter: 'contrast(1.08) saturate(0.92) hue-rotate(-8deg)',
+  },
+  {
+    id: 'warm',
+    label: 'Тёплая сцена',
+    cssFilter: 'contrast(1.06) saturate(1.18) sepia(0.14)',
+  },
+  {
+    id: 'vignette',
+    label: 'Кино-виньетка',
+    cssFilter: 'contrast(1.12) brightness(0.97)',
+  },
+  { id: 'bw', label: 'Ч/Б репортаж', cssFilter: 'grayscale(1) contrast(1.18)' },
+];
+
 export const DEFAULT_OBS_OVERLAY_CONFIG: ObsOverlayConfig = {
   showSubtitles: true,
   showOriginal: true,
   position: 'bottom',
   fontSize: 'md',
   outputAudioInOverlay: true,
+  showCameraPip: false,
   previewBackdrop: 'dark',
 };
 
 export const DEFAULT_OBS_WS_CONFIG: ObsWebSocketConfig = {
-  host: '127.0.0.1',
+  host: 'localhost',
   port: 4455,
   password: '',
+  useTls: false,
+  transport: 'browser_source_bridge',
   targetSourceName: 'Захват выходного звука',
   autoControlSource: true,
 };

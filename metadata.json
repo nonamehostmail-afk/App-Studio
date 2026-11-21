@@ -1,6 +1,6 @@
 {
   "name": "DubCast OBS",
   "description": "Плагин для OBS Studio: переводчик речи в реальном времени на базе Gemini 3.8 Flash TTS с автоматическим заглушением и заменой исходного звука.",
-  "requestFramePermissions": ["microphone"],
+  "requestFramePermissions": ["microphone", "camera"],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

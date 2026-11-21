@@ -141,11 +141,12 @@ test('buildObsOverlayUrl and generateObsLuaScript embed user configuration', () 
     position: 'bottom',
     fontSize: 'lg',
     outputAudioInOverlay: true,
+    showCameraPip: true,
     previewBackdrop: 'transparent',
   });
   assert.equal(
     url,
-    'https://studio.example.com/?mode=obs&subs=1&orig=0&pos=bottom&size=lg&audio=1',
+    'https://studio.example.com/?mode=obs&subs=1&orig=0&pos=bottom&size=lg&audio=1&cam=1',
   );
 
   const lua = generateObsLuaScript({

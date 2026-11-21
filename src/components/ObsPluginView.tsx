@@ -251,6 +251,27 @@ export function ObsPluginView({
               />
             </div>
 
+            <div className="flex items-center justify-between py-1">
+              <label
+                htmlFor="obs-cam-pip-toggle"
+                className="text-xs text-[#E6ECF5] font-medium"
+              >
+                Показывать мини-окно камеры (PiP)
+              </label>
+              <input
+                id="obs-cam-pip-toggle"
+                type="checkbox"
+                checked={overlayConfig.showCameraPip}
+                onChange={(e) =>
+                  onChangeOverlayConfig({
+                    ...overlayConfig,
+                    showCameraPip: e.target.checked,
+                  })
+                }
+                className="w-4 h-4 accent-[#E11D48] cursor-pointer"
+              />
+            </div>
+
             <div className="grid grid-cols-2 gap-3 pt-1">
               <div>
                 <label
@@ -339,9 +360,14 @@ export function ObsPluginView({
               overlayConfig.position === 'top' ? 'justify-start' : 'justify-end'
             } ${previewBgClass}`}
           >
-            <span className="absolute top-2.5 right-3 text-[11px] font-mono text-white/50">
+            <span className="absolute top-2.5 left-3 text-[11px] font-mono text-white/50">
               1920 × 1080 · Предпросмотр OBS
             </span>
+            {overlayConfig.showCameraPip && (
+              <div className="absolute top-3 right-3 w-32 aspect-video rounded border border-white/20 bg-[#151D2F] flex items-center justify-center text-[10px] font-mono text-[#94A3B8]">
+                CAM PiP
+              </div>
+            )}
             {overlayConfig.showSubtitles ? (
               <div className="bg-[#0B0E14]/90 backdrop-blur-sm border border-white/[0.12] rounded-md px-4 py-3 max-w-xl">
                 {overlayConfig.showOriginal && (
@@ -397,6 +423,58 @@ export function ObsPluginView({
           </div>
 
           <form onSubmit={handleConnectSubmit} className="space-y-3.5" noValidate>
+            {/* Transport Mode Switcher: Solves HTTPS/iframe mixed-content blocking of ws://127.0.0.1:4455 */}
+            <div>
+              <span className="block text-xs text-[#8B95A7] mb-1.5">
+                Способ подключения к OBS Studio
+              </span>
+              <div
+                role="group"
+                aria-label="Способ подключения к OBS WebSocket"
+                className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 p-1 bg-[#0B0E14] rounded-md border border-white/[0.06]"
+              >
+                <button
+                  type="button"
+                  aria-pressed={wsConfig.transport === 'browser_source_bridge'}
+                  onClick={() =>
+                    onChangeWsConfig({
+                      ...wsConfig,
+                      transport: 'browser_source_bridge',
+                    })
+                  }
+                  className={`px-3 py-2 rounded text-xs font-medium text-left transition-colors ${
+                    wsConfig.transport === 'browser_source_bridge'
+                      ? 'bg-[#E11D48] text-white'
+                      : 'text-[#94A3B8] hover:text-white hover:bg-white/[0.04]'
+                  }`}
+                >
+                  Через Browser Source (для HTTPS)
+                </button>
+                <button
+                  type="button"
+                  aria-pressed={wsConfig.transport === 'direct'}
+                  onClick={() =>
+                    onChangeWsConfig({
+                      ...wsConfig,
+                      transport: 'direct',
+                    })
+                  }
+                  className={`px-3 py-2 rounded text-xs font-medium text-left transition-colors ${
+                    wsConfig.transport === 'direct'
+                      ? 'bg-[#E11D48] text-white'
+                      : 'text-[#94A3B8] hover:text-white hover:bg-white/[0.04]'
+                  }`}
+                >
+                  Прямое (ws:// / wss://)
+                </button>
+              </div>
+              <p className="text-[11px] text-[#8B95A7] mt-1.5 leading-relaxed">
+                {wsConfig.transport === 'browser_source_bridge'
+                  ? 'Рекомендуется: обходит блокировку ws://localhost в HTTPS-браузере. Добавьте URL из блока 1 в OBS как «Источник браузера», затем нажмите «Подключить» — оверлей сам свяжется с OBS на вашем ПК.'
+                  : 'Прямое подключение из текущей вкладки браузера. Если браузер блокирует ws://127.0.0.1 на HTTPS-странице, укажите хост localhost или переключитесь на режим «Через Browser Source».'}
+              </p>
+            </div>
+
             <div className="grid grid-cols-3 gap-3">
               <div className="col-span-2">
                 <label
@@ -412,7 +490,7 @@ export function ObsPluginView({
                   onChange={(e) =>
                     onChangeWsConfig({ ...wsConfig, host: e.target.value })
                   }
-                  placeholder="127.0.0.1"
+                  placeholder="localhost"
                   className="w-full bg-[#0B0E14] border border-white/[0.1] rounded-md px-3 py-2 text-xs font-mono text-[#F1F5F9] focus:outline-none focus:border-[#E11D48]"
                 />
               </div>
@@ -500,31 +578,53 @@ export function ObsPluginView({
               </div>
             </div>
 
-            <div className="flex items-center justify-between pt-1">
-              <label
-                htmlFor="obs-auto-mute-toggle"
-                className="text-xs text-[#CBD5E1]"
-              >
-                Автоматически глушить выбранный источник при озвучке
-              </label>
-              <input
-                id="obs-auto-mute-toggle"
-                type="checkbox"
-                checked={wsConfig.autoControlSource}
-                onChange={(e) =>
-                  onChangeWsConfig({
-                    ...wsConfig,
-                    autoControlSource: e.target.checked,
-                  })
-                }
-                className="w-4 h-4 accent-[#E11D48] cursor-pointer"
-              />
+            <div className="space-y-2 pt-1">
+              <div className="flex items-center justify-between">
+                <label
+                  htmlFor="obs-auto-mute-toggle"
+                  className="text-xs text-[#CBD5E1]"
+                >
+                  Автоматически глушить выбранный источник при озвучке
+                </label>
+                <input
+                  id="obs-auto-mute-toggle"
+                  type="checkbox"
+                  checked={wsConfig.autoControlSource}
+                  onChange={(e) =>
+                    onChangeWsConfig({
+                      ...wsConfig,
+                      autoControlSource: e.target.checked,
+                    })
+                  }
+                  className="w-4 h-4 accent-[#E11D48] cursor-pointer"
+                />
+              </div>
+              <div className="flex items-center justify-between">
+                <label
+                  htmlFor="obs-tls-toggle"
+                  className="text-xs text-[#CBD5E1]"
+                >
+                  Использовать защищённый туннель (wss:// / Cloudflare Tunnel)
+                </label>
+                <input
+                  id="obs-tls-toggle"
+                  type="checkbox"
+                  checked={wsConfig.useTls}
+                  onChange={(e) =>
+                    onChangeWsConfig({
+                      ...wsConfig,
+                      useTls: e.target.checked,
+                    })
+                  }
+                  className="w-4 h-4 accent-[#E11D48] cursor-pointer"
+                />
+              </div>
             </div>
 
             {(wsValidationError || wsMessage) && (
               <p
                 role={wsValidationError || wsState === 'error' ? 'alert' : 'status'}
-                className={`text-xs ${
+                className={`text-xs leading-relaxed ${
                   wsValidationError || wsState === 'error'
                     ? 'text-[#FB7185]'
                     : 'text-[#34D399]'
@@ -563,7 +663,9 @@ export function ObsPluginView({
                   <PlugZap className="w-3.5 h-3.5" />
                   {wsState === 'connecting'
                     ? 'Подключение…'
-                    : 'Подключить OBS WebSocket'}
+                    : wsConfig.transport === 'browser_source_bridge'
+                      ? 'Подключить через Browser Source'
+                      : 'Подключить OBS WebSocket'}
                 </button>
               )}
             </div>

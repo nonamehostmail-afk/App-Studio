@@ -246,6 +246,7 @@ export function buildObsOverlayUrl(
     pos: config.position,
     size: config.fontSize,
     audio: config.outputAudioInOverlay ? '1' : '0',
+    cam: config.showCameraPip ? '1' : '0',
   });
   return `${cleanOrigin}/?${params.toString()}`;
 }

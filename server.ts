@@ -10,6 +10,14 @@ import {
   ThinkingLevel,
   type LiveServerMessage,
 } from '@google/genai';
+import {
+  buildLocalChatEndpoint,
+  buildLocalModelsEndpoint,
+  buildLocalTranslateRequest,
+  extractLocalTranslationText,
+  parseLocalModelList,
+} from './src/utils/localModel.ts';
+import type { LocalModelProtocol } from './src/types/translator.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -114,40 +122,58 @@ async function startServer() {
 
   const server = http.createServer(app);
 
-  // Connected OBS Browser Source clients for live subtitle & audio sync
+  // Connected OBS Browser Source & Console clients for live subtitle, camera PiP, audio & OBS WebSocket bridge sync
   const obsClients = new Set<WebSocket>();
+  let latestObsDuckState: {
+    isDucking: boolean;
+    isOriginalMuted: boolean;
+    gainReductionDb: number;
+    updatedAt: number;
+  } = {
+    isDucking: false,
+    isOriginalMuted: false,
+    gainReductionDb: 0,
+    updatedAt: Date.now(),
+  };
+
   const obsWss = new WebSocketServer({ noServer: true });
   const transcribeWss = new WebSocketServer({ noServer: true });
   const liveTranslateWss = new WebSocketServer({ noServer: true });
 
-  function broadcastToObs(payload: unknown) {
+  function broadcastToObs(payload: unknown, exclude?: WebSocket) {
+    const obj = payload as Record<string, unknown> | null;
+    if (obj && obj.type === 'duck_state') {
+      latestObsDuckState = {
+        isDucking: Boolean(obj.isDucking),
+        isOriginalMuted: Boolean(obj.isOriginalMuted),
+        gainReductionDb:
+          typeof obj.gainReductionDb === 'number' ? obj.gainReductionDb : 0,
+        updatedAt: Date.now(),
+      };
+    }
     const serialized = JSON.stringify(payload);
     for (const client of obsClients) {
-      if (client.readyState === WebSocket.OPEN) {
+      if (client !== exclude && client.readyState === WebSocket.OPEN) {
         client.send(serialized);
       }
     }
   }
 
+  function broadcastObsClientCount() {
+    broadcastToObs({
+      type: 'connected',
+      clients: obsClients.size,
+    });
+  }
+
   obsWss.on('connection', (ws) => {
     obsClients.add(ws);
-    ws.send(
-      JSON.stringify({
-        type: 'connected',
-        clients: obsClients.size,
-      }),
-    );
+    broadcastObsClientCount();
 
     ws.on('message', (raw) => {
       try {
         const msg = JSON.parse(raw.toString());
-        // Relay console messages to all other OBS overlay listeners
-        const out = JSON.stringify(msg);
-        for (const client of obsClients) {
-          if (client !== ws && client.readyState === WebSocket.OPEN) {
-            client.send(out);
-          }
-        }
+        broadcastToObs(msg, ws);
       } catch {
         // Ignore malformed messages
       }
@@ -155,6 +181,7 @@ async function startServer() {
 
     ws.on('close', () => {
       obsClients.delete(ws);
+      broadcastObsClientCount();
     });
   });
 
@@ -369,6 +396,10 @@ async function startServer() {
           session.sendRealtimeInput({
             audio: { data: msg.data, mimeType: 'audio/pcm;rate=16000' },
           });
+        } else if (msg.type === 'video' && typeof msg.data === 'string') {
+          session.sendRealtimeInput({
+            video: { data: msg.data, mimeType: 'image/jpeg' },
+          });
         }
       } catch {
         // Ignore invalid frame
@@ -418,9 +449,15 @@ async function startServer() {
     });
   });
 
-  // Fast neural translation optimized for live broadcast dubbing (gemini-4-hydrogen)
+  // Fast neural translation optimized for live broadcast dubbing (optional camera frame vision context)
   app.post('/api/translate', async (req, res) => {
-    const { text, sourceLang = 'auto', targetLang = 'ru', context = '' } = req.body ?? {};
+    const {
+      text,
+      sourceLang = 'auto',
+      targetLang = 'ru',
+      context = '',
+      videoFrameBase64 = '',
+    } = req.body ?? {};
     if (typeof text !== 'string' || !text.trim()) {
       res.status(400).json({ error: 'Передайте непустой текст для перевода.' });
       return;
@@ -432,10 +469,31 @@ async function startServer() {
     try {
       const ai = getAiClient();
       const started = Date.now();
+      const hasFrame =
+        typeof videoFrameBase64 === 'string' &&
+        videoFrameBase64.length > 100 &&
+        videoFrameBase64.length < 3_000_000;
+
+      const contents = hasFrame
+        ? {
+            parts: [
+              {
+                inlineData: {
+                  mimeType: 'image/jpeg',
+                  data: videoFrameBase64,
+                },
+              },
+              {
+                text: `Use the attached camera frame only as visual context if helpful for disambiguating terms. Translate this spoken utterance:\n${text.trim()}`,
+              },
+            ],
+          }
+        : text.trim();
+
       const response = await withRetry(() =>
         ai.models.generateContent({
           model: 'gemini-3.1-flash-lite',
-          contents: text.trim(),
+          contents,
           config: {
             thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
             systemInstruction: [
@@ -460,10 +518,152 @@ async function startServer() {
       res.json({
         translatedText,
         translateMs: Date.now() - started,
+        usedVisionContext: hasFrame,
       });
     } catch (err) {
       const formatted = formatApiError(err);
       res.status(formatted.status).json({ error: formatted.message });
+    }
+  });
+
+  // Server-side proxy for local LLM model discovery (Ollama / OpenAI-compatible LM Studio, llama.cpp, vLLM)
+  app.post('/api/local-models', async (req, res) => {
+    const { baseUrl, protocol = 'ollama', apiKey = '' } = req.body ?? {};
+    const safeProto: LocalModelProtocol =
+      protocol === 'openai' ? 'openai' : 'ollama';
+
+    let endpoint = '';
+    try {
+      endpoint = buildLocalModelsEndpoint(String(baseUrl || ''), safeProto);
+      const parsed = new URL(endpoint);
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        throw new Error('Разрешены только протоколы http:// и https://.');
+      }
+    } catch (err) {
+      res.status(400).json({
+        error: err instanceof Error ? err.message : 'Некорректный URL сервера модели.',
+      });
+      return;
+    }
+
+    try {
+      const headers: Record<string, string> = {};
+      if (typeof apiKey === 'string' && apiKey.trim()) {
+        headers.Authorization = `Bearer ${apiKey.trim()}`;
+      }
+      const upstream = await fetch(endpoint, {
+        method: 'GET',
+        headers,
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!upstream.ok) {
+        res.status(502).json({
+          error: `Локальный сервер вернул статус ${upstream.status} (${endpoint}).`,
+        });
+        return;
+      }
+      const data = await upstream.json();
+      const models = parseLocalModelList(safeProto, data);
+      res.json({ models, endpoint });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      res.status(502).json({
+        error: `Сервер не смог подключиться к ${endpoint} (${detail}). Если модель запущена на вашем ПК (localhost), переключите транспорт на «Из браузера напрямую» и разрешите CORS (OLLAMA_ORIGINS=*).`,
+      });
+    }
+  });
+
+  // Server-side proxy for local LLM translation
+  app.post('/api/local-translate', async (req, res) => {
+    const {
+      baseUrl,
+      protocol = 'ollama',
+      modelName = '',
+      apiKey = '',
+      text = '',
+      sourceLang = 'auto',
+      targetLang = 'ru',
+    } = req.body ?? {};
+
+    if (typeof text !== 'string' || !text.trim()) {
+      res.status(400).json({ error: 'Передайте непустой текст для перевода.' });
+      return;
+    }
+    if (typeof modelName !== 'string' || !modelName.trim()) {
+      res.status(400).json({ error: 'Укажите имя локальной модели (например, qwen2.5:7b).' });
+      return;
+    }
+
+    const safeProto: LocalModelProtocol =
+      protocol === 'openai' ? 'openai' : 'ollama';
+
+    let endpoint = '';
+    try {
+      endpoint = buildLocalChatEndpoint(String(baseUrl || ''), safeProto);
+      const parsed = new URL(endpoint);
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        throw new Error('Разрешены только протоколы http:// и https://.');
+      }
+    } catch (err) {
+      res.status(400).json({
+        error: err instanceof Error ? err.message : 'Некорректный URL сервера модели.',
+      });
+      return;
+    }
+
+    const srcName = LANGUAGE_NAMES[sourceLang] || 'Auto-detected language';
+    const tgtName = LANGUAGE_NAMES[targetLang] || 'Russian';
+
+    try {
+      const started = Date.now();
+      const body = buildLocalTranslateRequest({
+        protocol: safeProto,
+        modelName,
+        text,
+        sourceLangName: srcName,
+        targetLangName: tgtName,
+      });
+
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
+      if (typeof apiKey === 'string' && apiKey.trim()) {
+        headers.Authorization = `Bearer ${apiKey.trim()}`;
+      }
+
+      const upstream = await fetch(endpoint, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(25000),
+      });
+      if (!upstream.ok) {
+        const errText = (await upstream.text()).slice(0, 200);
+        res.status(502).json({
+          error: `Локальная модель вернула ошибку ${upstream.status}: ${errText || endpoint}`,
+        });
+        return;
+      }
+
+      const json = await upstream.json();
+      const translatedText = extractLocalTranslationText(safeProto, json);
+      if (!translatedText) {
+        res.status(502).json({
+          error: 'Локальная модель вернула пустой перевод.',
+        });
+        return;
+      }
+
+      res.json({
+        translatedText,
+        translateMs: Date.now() - started,
+        model: modelName.trim(),
+      });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      res.status(502).json({
+        error: `Не удалось обратиться к локальной модели по адресу ${endpoint} (${detail}). Для локального запуска на вашем ПК выберите транспорт «Из браузера напрямую».`,
+      });
     }
   });
 
@@ -664,10 +864,18 @@ async function startServer() {
     }
   });
 
-  // Push subtitle/audio events to all connected OBS Browser Source overlays
+  // Push subtitle/audio/camera/bridge events to all connected OBS Browser Source overlays
   app.post('/api/obs/broadcast', (req, res) => {
     broadcastToObs(req.body ?? {});
     res.json({ ok: true, clients: obsClients.size });
+  });
+
+  // Poll latest ducking state for external OBS Lua / Python scripts
+  app.get('/api/obs/state', (_req, res) => {
+    res.json({
+      ...latestObsDuckState,
+      obsOverlayClients: obsClients.size,
+    });
   });
 
   if (!IS_PROD) {

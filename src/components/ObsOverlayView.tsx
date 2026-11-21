@@ -1,12 +1,16 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ObsBroadcastPayload } from '../types/translator';
 import { base64ToUint8 } from '../utils/duckingMath';
+import { ObsWebSocketClient } from '../utils/obsWebSocket';
 
 /**
  * Dedicated transparent OBS Browser Source view (`/?mode=obs`).
- * Receives real-time translated subtitles and Gemini 3.8 Flash TTS audio
- * via `/ws/obs` and `BroadcastChannel` so OBS Studio can route translated voice
- * as an independent Audio Mixer track ("Control audio via OBS").
+ * 1. Receives real-time translated subtitles, camera PiP frames, and Gemini 3.8 Flash TTS audio
+ *    via `/ws/obs` and `BroadcastChannel` so OBS Studio can route translated voice
+ *    as an independent Audio Mixer track ("Control audio via OBS").
+ * 2. Acts as a Local OBS WebSocket v5 Bridge inside OBS Studio's own CEF browser:
+ *    connects directly to `ws://localhost:4455` on the user's PC (bypassing HTTPS/iframe
+ *    browser security blocks) and executes mute/volume commands relayed from the Console.
  */
 export function ObsOverlayView() {
   const params = new URLSearchParams(window.location.search);
@@ -23,9 +27,11 @@ export function ObsOverlayView() {
         : 'md',
   );
   const [outputAudio, setOutputAudio] = useState(params.get('audio') !== '0');
+  const [showCameraPip, setShowCameraPip] = useState(params.get('cam') === '1');
 
   const [originalText, setOriginalText] = useState('');
   const [translatedText, setTranslatedText] = useState('');
+  const [cameraFrameUrl, setCameraFrameUrl] = useState('');
   const [isVisible, setIsVisible] = useState(false);
 
   const hideTimerRef = useRef<number | null>(null);
@@ -41,6 +47,36 @@ export function ObsOverlayView() {
   }, []);
 
   useEffect(() => {
+    let ws: WebSocket | null = null;
+    let channel: BroadcastChannel | null = null;
+    let reconnectTimer: number | null = null;
+    let disposed = false;
+
+    const sendBack = (msg: ObsBroadcastPayload) => {
+      try {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify(msg));
+        }
+      } catch {
+        // Ignore ws send error
+      }
+      try {
+        channel?.postMessage(msg);
+      } catch {
+        // Ignore channel send error
+      }
+    };
+
+    // Embedded local OBS WebSocket v5 client (runs natively inside OBS Studio CEF!)
+    const localObsClient = new ObsWebSocketClient((state, message) => {
+      sendBack({
+        type: 'obs_bridge_status',
+        bridgeState: state,
+        bridgeMessage: message,
+        timestamp: Date.now(),
+      });
+    });
+
     const playWavInOverlay = async (base64Wav: string) => {
       if (!outputAudioRef.current) return;
       try {
@@ -81,6 +117,70 @@ export function ObsOverlayView() {
         if (typeof payload.config.outputAudioInOverlay === 'boolean') {
           setOutputAudio(payload.config.outputAudioInOverlay);
         }
+        if (typeof payload.config.showCameraPip === 'boolean') {
+          setShowCameraPip(payload.config.showCameraPip);
+        }
+        return;
+      }
+
+      if (payload.type === 'camera_frame' && payload.cameraFrameDataUrl) {
+        setCameraFrameUrl(payload.cameraFrameDataUrl);
+        return;
+      }
+
+      if (payload.type === 'obs_bridge_connect' && payload.bridgeConfig) {
+        const cfg = payload.bridgeConfig;
+        void localObsClient
+          .connect(cfg.host, cfg.port, cfg.password, cfg.useTls)
+          .then((sources) => {
+            sendBack({
+              type: 'obs_bridge_status',
+              bridgeState: 'connected',
+              bridgeMessage: `Подключено через Browser Source внутри OBS (${cfg.host}:${cfg.port})`,
+              bridgeSources: sources,
+              timestamp: Date.now(),
+            });
+          })
+          .catch((err) => {
+            sendBack({
+              type: 'obs_bridge_status',
+              bridgeState: 'error',
+              bridgeMessage:
+                err instanceof Error
+                  ? err.message
+                  : 'Не удалось подключиться к OBS WebSocket из Browser Source.',
+              timestamp: Date.now(),
+            });
+          });
+        return;
+      }
+
+      if (payload.type === 'obs_bridge_disconnect') {
+        localObsClient.disconnect();
+        sendBack({
+          type: 'obs_bridge_status',
+          bridgeState: 'disconnected',
+          bridgeMessage: 'Мост Browser Source отключён от OBS WebSocket.',
+          timestamp: Date.now(),
+        });
+        return;
+      }
+
+      if (payload.type === 'obs_bridge_mute' && payload.sourceName) {
+        void localObsClient
+          .setInputMute(payload.sourceName, Boolean(payload.muted))
+          .catch(() => {});
+        return;
+      }
+
+      if (
+        payload.type === 'obs_bridge_volume' &&
+        payload.sourceName &&
+        typeof payload.volumeDb === 'number'
+      ) {
+        void localObsClient
+          .setInputVolumeDb(payload.sourceName, payload.volumeDb)
+          .catch(() => {});
         return;
       }
 
@@ -109,19 +209,27 @@ export function ObsOverlayView() {
       }
     };
 
-    // 1. Server WebSocket sync (works across OBS CEF & external browsers)
-    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const ws = new WebSocket(`${proto}//${window.location.host}/ws/obs`);
-    ws.onmessage = (event) => {
-      try {
-        handlePayload(JSON.parse(String(event.data)));
-      } catch {
-        // Ignore
-      }
+    const connectObsRelay = () => {
+      if (disposed) return;
+      const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const socket = new WebSocket(`${proto}//${window.location.host}/ws/obs`);
+      ws = socket;
+      socket.onmessage = (event) => {
+        try {
+          handlePayload(JSON.parse(String(event.data)));
+        } catch {
+          // Ignore malformed ws messages
+        }
+      };
+      socket.onclose = () => {
+        if (!disposed) {
+          reconnectTimer = window.setTimeout(connectObsRelay, 2500);
+        }
+      };
     };
 
-    // 2. Local BroadcastChannel fallback for same-browser testing
-    let channel: BroadcastChannel | null = null;
+    connectObsRelay();
+
     if (typeof BroadcastChannel !== 'undefined') {
       channel = new BroadcastChannel('dubcast-obs-sync');
       channel.onmessage = (event) => {
@@ -130,8 +238,11 @@ export function ObsOverlayView() {
     }
 
     return () => {
-      ws.close();
+      disposed = true;
+      if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
+      ws?.close();
       channel?.close();
+      localObsClient.disconnect();
       if (hideTimerRef.current !== null) {
         window.clearTimeout(hideTimerRef.current);
       }
@@ -148,10 +259,20 @@ export function ObsOverlayView() {
   return (
     <main
       data-testid="obs-overlay-root"
-      className={`w-screen h-screen bg-transparent p-10 flex flex-col ${
+      className={`w-screen h-screen bg-transparent p-10 flex flex-col relative ${
         position === 'top' ? 'justify-start' : 'justify-end'
       } items-center`}
     >
+      {showCameraPip && cameraFrameUrl && (
+        <div className="absolute top-6 right-6 w-72 aspect-video rounded-lg overflow-hidden border border-white/20 bg-[#0B0E14] shadow-2xl">
+          <img
+            src={cameraFrameUrl}
+            alt="Поток камеры DubCast"
+            className="w-full h-full object-cover"
+          />
+        </div>
+      )}
+
       {showSubtitles && isVisible && translatedText ? (
         <div className="max-w-4xl w-full bg-[#0B0E14]/92 border border-white/15 rounded-lg px-7 py-5 shadow-2xl transition-opacity duration-200">
           {showOriginal && originalText && (
@@ -165,7 +286,7 @@ export function ObsOverlayView() {
         </div>
       ) : (
         <div className="sr-only" aria-live="polite">
-          DubCast OBS Browser Source готов к приёму перевода и озвучки.
+          DubCast OBS Browser Source готов к приёму перевода, озвучки и команд OBS WebSocket.
         </div>
       )}
     </main>
