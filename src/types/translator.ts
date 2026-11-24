@@ -24,6 +24,16 @@ export type CameraFilterMode =
   | 'vignette'
   | 'bw';
 
+export type FaceMaskType =
+  | 'none'
+  | 'blur_privacy'
+  | 'pixel_censor'
+  | 'cyber_visor'
+  | 'neon_anon'
+  | 'fox_kit'
+  | 'aviator_shades'
+  | 'custom_png';
+
 export type ObsWsTransportMode = 'direct' | 'browser_source_bridge';
 
 export interface LocalModelConfig {
@@ -42,6 +52,11 @@ export interface CameraConfig {
   fps: 30 | 60;
   mirror: boolean;
   filter: CameraFilterMode;
+  faceMask: FaceMaskType;
+  faceMaskAutoTrack: boolean;
+  faceMaskScale: number;
+  faceMaskOffsetY: number;
+  faceMaskOpacity: number;
   sendVisionToGemini: boolean;
   sendVideoToObs: boolean;
 }
@@ -121,6 +136,9 @@ export interface ObsBroadcastPayload {
   type:
     | 'subtitle'
     | 'audio_wav'
+    | 'audio_pcm'
+    | 'audio_stop'
+    | 'test_audio'
     | 'duck_state'
     | 'config'
     | 'clear'
@@ -129,11 +147,15 @@ export interface ObsBroadcastPayload {
     | 'obs_bridge_disconnect'
     | 'obs_bridge_mute'
     | 'obs_bridge_volume'
-    | 'obs_bridge_status';
+    | 'obs_bridge_status'
+    | 'ping';
   id?: string;
   originalText?: string;
   translatedText?: string;
   audioBase64Wav?: string;
+  pcmBase64?: string;
+  sampleRate?: number;
+  ttsGainDb?: number;
   cameraFrameDataUrl?: string;
   isDucking?: boolean;
   isOriginalMuted?: boolean;

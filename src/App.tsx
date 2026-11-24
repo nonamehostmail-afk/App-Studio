@@ -217,8 +217,7 @@ function StudioConsoleApp() {
 
     const handleBridgeMessage = (msg: ObsBroadcastPayload & { clients?: number }) => {
       if ((msg as { type?: string }).type === 'connected' && typeof msg.clients === 'number') {
-        // Subtract 1 for this Console client's own /ws/obs socket
-        setObsClientsCount(Math.max(0, msg.clients - 1));
+        setObsClientsCount(Math.max(0, msg.clients));
         return;
       }
       if (msg.type === 'obs_bridge_status') {
@@ -252,10 +251,13 @@ function StudioConsoleApp() {
       };
     }
 
+    let pingTimer: number | null = null;
     const connectRelayWs = () => {
       if (disposed) return;
       const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const socket = new WebSocket(`${proto}//${window.location.host}/ws/obs`);
+      const socket = new WebSocket(
+        `${proto}//${window.location.host}/ws/obs?role=console`,
+      );
       obsRelayWsRef.current = socket;
       socket.onmessage = (event) => {
         try {
@@ -274,6 +276,17 @@ function StudioConsoleApp() {
       };
     };
     connectRelayWs();
+
+    pingTimer = window.setInterval(() => {
+      const sock = obsRelayWsRef.current;
+      if (sock && sock.readyState === WebSocket.OPEN) {
+        try {
+          sock.send(JSON.stringify({ type: 'ping' }));
+        } catch {
+          // Ignore
+        }
+      }
+    }, 20_000);
 
     obsWsClientRef.current = new ObsWebSocketClient((state, msg) => {
       if (latestStateRef.current.obsWsConfig.transport === 'direct') {
@@ -346,6 +359,7 @@ function StudioConsoleApp() {
     return () => {
       disposed = true;
       if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
+      if (pingTimer !== null) window.clearInterval(pingTimer);
       if (bridgeConnectTimeoutRef.current !== null) {
         window.clearTimeout(bridgeConnectTimeoutRef.current);
       }
@@ -728,6 +742,17 @@ function StudioConsoleApp() {
               const event = JSON.parse(dataLine.slice(6));
               if (event.type === 'pcm' && event.data) {
                 engineRef.current?.enqueuePcm24kBase64(event.data);
+                // Stream 24kHz PCM chunk directly to OBS Browser Source so OBS Mixer receives audio!
+                broadcastToObsOverlay(
+                  {
+                    type: 'audio_pcm',
+                    pcmBase64: event.data,
+                    sampleRate: 24000,
+                    ttsGainDb: curDuck.ttsGainDb,
+                    timestamp: Date.now(),
+                  },
+                  true,
+                );
               } else if (event.type === 'done') {
                 ttsMs = event.ttsMs || 0;
               } else if (event.type === 'error') {
@@ -759,6 +784,7 @@ function StudioConsoleApp() {
               originalText: clean,
               translatedText,
               audioBase64Wav,
+              ttsGainDb: curDuck.ttsGainDb,
               timestamp: Date.now(),
             });
             void engineRef.current?.playWavBase64(audioBase64Wav);
@@ -843,6 +869,7 @@ function StudioConsoleApp() {
           }
           if (msg.type === 'interrupted') {
             engineRef.current?.stopAllTts();
+            broadcastToObsOverlay({ type: 'audio_stop' }, true);
             return;
           }
           if (msg.type === 'interim' && msg.text) {
@@ -870,6 +897,16 @@ function StudioConsoleApp() {
           }
           if (msg.type === 'audio' && msg.data) {
             engineRef.current?.enqueuePcm24kBase64(msg.data);
+            broadcastToObsOverlay(
+              {
+                type: 'audio_pcm',
+                pcmBase64: msg.data,
+                sampleRate: 24000,
+                ttsGainDb: latestStateRef.current.duckingConfig.ttsGainDb,
+                timestamp: Date.now(),
+              },
+              true,
+            );
           }
         } catch {
           // Ignore malformed ws messages
@@ -1416,6 +1453,7 @@ function StudioConsoleApp() {
               onStopAudio={() => {
                 engineRef.current?.stopAllTts();
                 engineRef.current?.stopOriginalClip();
+                broadcastToObsOverlay({ type: 'audio_stop' }, true);
               }}
               localModelConfig={localModelConfig}
               onChangeLocalModelConfig={setLocalModelConfig}
@@ -1449,6 +1487,15 @@ function StudioConsoleApp() {
               onConnectObsWs={handleConnectObsWs}
               onDisconnectObsWs={handleDisconnectObsWs}
               onTestObsMute={handleTestObsMute}
+              onTestObsOverlayAudio={() => {
+                broadcastToObsOverlay({
+                  type: 'test_audio',
+                  originalText: 'OBS Audio Channel Check',
+                  translatedText:
+                    'Проверка канала озвучки OBS — звук Gemini 3.8 Flash TTS активен',
+                  timestamp: Date.now(),
+                });
+              }}
               duckingConfig={duckingConfig}
               latestOriginal={entries[0]?.originalText || ''}
               latestTranslated={entries[0]?.translatedText || ''}

@@ -122,8 +122,9 @@ async function startServer() {
 
   const server = http.createServer(app);
 
-  // Connected OBS Browser Source & Console clients for live subtitle, camera PiP, audio & OBS WebSocket bridge sync
-  const obsClients = new Set<WebSocket>();
+  // Connected OBS Browser Source & Console clients for live subtitle, camera PiP, streaming PCM audio & OBS WebSocket bridge sync
+  const obsClients = new Map<WebSocket, 'console' | 'overlay'>();
+  let latestOverlayConfig: Record<string, unknown> | null = null;
   let latestObsDuckState: {
     isDucking: boolean;
     isOriginalMuted: boolean;
@@ -140,8 +141,20 @@ async function startServer() {
   const transcribeWss = new WebSocketServer({ noServer: true });
   const liveTranslateWss = new WebSocketServer({ noServer: true });
 
+  function getOverlayCount(): number {
+    let count = 0;
+    for (const role of obsClients.values()) {
+      if (role === 'overlay') count++;
+    }
+    return count;
+  }
+
   function broadcastToObs(payload: unknown, exclude?: WebSocket) {
     const obj = payload as Record<string, unknown> | null;
+    if (obj && obj.type === 'ping') return;
+    if (obj && obj.type === 'config' && obj.config && typeof obj.config === 'object') {
+      latestOverlayConfig = obj.config as Record<string, unknown>;
+    }
     if (obj && obj.type === 'duck_state') {
       latestObsDuckState = {
         isDucking: Boolean(obj.isDucking),
@@ -152,7 +165,7 @@ async function startServer() {
       };
     }
     const serialized = JSON.stringify(payload);
-    for (const client of obsClients) {
+    for (const client of obsClients.keys()) {
       if (client !== exclude && client.readyState === WebSocket.OPEN) {
         client.send(serialized);
       }
@@ -162,17 +175,44 @@ async function startServer() {
   function broadcastObsClientCount() {
     broadcastToObs({
       type: 'connected',
-      clients: obsClients.size,
+      clients: getOverlayCount(),
     });
   }
 
-  obsWss.on('connection', (ws) => {
-    obsClients.add(ws);
+  // Keepalive ping every 20s so Cloud Run / reverse proxies never silently close idle OBS Browser Source sockets
+  const obsHeartbeat = setInterval(() => {
+    for (const client of obsClients.keys()) {
+      if (client.readyState === WebSocket.OPEN) {
+        try {
+          client.ping();
+        } catch {
+          // Ignore broken pipe
+        }
+      }
+    }
+  }, 20_000);
+  obsHeartbeat.unref?.();
+
+  obsWss.on('connection', (ws, req) => {
+    const reqUrl = new URL(req.url || '/ws/obs', 'http://localhost');
+    const role: 'console' | 'overlay' =
+      reqUrl.searchParams.get('role') === 'console' ? 'console' : 'overlay';
+    obsClients.set(ws, role);
     broadcastObsClientCount();
+
+    if (role === 'overlay' && latestOverlayConfig) {
+      ws.send(JSON.stringify({ type: 'config', config: latestOverlayConfig }));
+    }
 
     ws.on('message', (raw) => {
       try {
         const msg = JSON.parse(raw.toString());
+        if (msg?.type === 'ping') {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'pong', ts: Date.now() }));
+          }
+          return;
+        }
         broadcastToObs(msg, ws);
       } catch {
         // Ignore malformed messages
@@ -445,7 +485,7 @@ async function startServer() {
           process.env.GEMINI_API_KEY !== 'MY_GEMINI_API_KEY',
       ),
       ttsModelDefault: 'gemini-3.8-flash-tts',
-      obsOverlayClients: obsClients.size,
+      obsOverlayClients: getOverlayCount(),
     });
   });
 
@@ -867,14 +907,14 @@ async function startServer() {
   // Push subtitle/audio/camera/bridge events to all connected OBS Browser Source overlays
   app.post('/api/obs/broadcast', (req, res) => {
     broadcastToObs(req.body ?? {});
-    res.json({ ok: true, clients: obsClients.size });
+    res.json({ ok: true, clients: getOverlayCount() });
   });
 
   // Poll latest ducking state for external OBS Lua / Python scripts
   app.get('/api/obs/state', (_req, res) => {
     res.json({
       ...latestObsDuckState,
-      obsOverlayClients: obsClients.size,
+      obsOverlayClients: getOverlayCount(),
     });
   });
 

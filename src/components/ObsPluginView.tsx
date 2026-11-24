@@ -7,6 +7,7 @@ import {
   Link2,
   Plug,
   PlugZap,
+  Volume2,
   VolumeX,
 } from 'lucide-react';
 import type {
@@ -28,6 +29,7 @@ interface ObsPluginViewProps {
   onConnectObsWs: () => Promise<void>;
   onDisconnectObsWs: () => void;
   onTestObsMute: () => Promise<void>;
+  onTestObsOverlayAudio: () => void;
   duckingConfig: DuckingConfig;
   latestOriginal: string;
   latestTranslated: string;
@@ -45,6 +47,7 @@ export function ObsPluginView({
   onConnectObsWs,
   onDisconnectObsWs,
   onTestObsMute,
+  onTestObsOverlayAudio,
   duckingConfig,
   latestOriginal,
   latestTranslated,
@@ -174,6 +177,14 @@ export function ObsPluginView({
               </>
             )}
           </button>
+          <button
+            type="button"
+            onClick={onTestObsOverlayAudio}
+            className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-md text-xs font-medium bg-[#1C2230] hover:bg-[#252D40] text-[#E6ECF5] border border-white/[0.08] transition-colors whitespace-nowrap shrink-0"
+          >
+            <Volume2 className="w-3.5 h-3.5 text-[#34D399]" />
+            Тест звука в OBS
+          </button>
           <a
             href={overlayUrl}
             target="_blank"
@@ -184,6 +195,10 @@ export function ObsPluginView({
             Открыть оверлей
           </a>
         </div>
+
+        <p className="text-[11px] text-[#8B95A7] mb-4 leading-relaxed">
+          Потоковый звук <code className="text-[#CBD5E1]">gemini-3.8-flash-tts</code> (PCM 24 кГц и WAV) теперь передаётся в оверлей автоматически. В OBS включите «Управление аудио через OBS», а чтобы слышать дорожку и в наушниках — откройте «Расширенные свойства аудио» и выберите «Мониторинг и вывод».
+        </p>
 
         {/* Overlay Settings + Live Preview */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-stretch">

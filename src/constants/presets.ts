@@ -2,6 +2,7 @@ import type {
   CameraConfig,
   CameraFilterMode,
   DuckingConfig,
+  FaceMaskType,
   LanguageOption,
   LocalModelConfig,
   LocalModelProtocol,
@@ -158,9 +159,57 @@ export const DEFAULT_CAMERA_CONFIG: CameraConfig = {
   fps: 30,
   mirror: false,
   filter: 'none',
+  faceMask: 'none',
+  faceMaskAutoTrack: true,
+  faceMaskScale: 1.0,
+  faceMaskOffsetY: 0,
+  faceMaskOpacity: 1.0,
   sendVisionToGemini: true,
   sendVideoToObs: false,
 };
+
+export const FACE_MASK_PRESETS: {
+  id: FaceMaskType;
+  label: string;
+  hint: string;
+}[] = [
+  { id: 'none', label: 'Без маски', hint: 'Оригинальное лицо без наложений' },
+  {
+    id: 'blur_privacy',
+    label: 'Блюр лица',
+    hint: 'Мягкое размытие лица для анонимности в эфире',
+  },
+  {
+    id: 'pixel_censor',
+    label: 'Пикселизация',
+    hint: 'Эфирная мозаичная цензура лица',
+  },
+  {
+    id: 'cyber_visor',
+    label: 'Студийный визор',
+    hint: 'Тёмный визор на глаза с красным индикатором',
+  },
+  {
+    id: 'fox_kit',
+    label: 'Кицунэ (VTuber)',
+    hint: 'Стилизованная маска лисы для стримов',
+  },
+  {
+    id: 'neon_anon',
+    label: 'Анонимус',
+    hint: 'Геометрическая тёмная маска-щиток на лицо',
+  },
+  {
+    id: 'aviator_shades',
+    label: 'Очки эфира',
+    hint: 'Тёмные студийные очки с бликом',
+  },
+  {
+    id: 'custom_png',
+    label: 'Своя PNG',
+    hint: 'Загрузите любую картинку маски (PNG с прозрачностью)',
+  },
+];
 
 export const CAMERA_FILTERS: {
   id: CameraFilterMode;
