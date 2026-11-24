@@ -1,18 +1,31 @@
 import { useMemo, useState } from 'react';
-import { Download, Play, Search, Trash2 } from 'lucide-react';
+import { Download, FileAudio, Play, Search, Trash2 } from 'lucide-react';
 import type { TranscriptEntry } from '../types/translator';
-import { exportEntriesToSrt, formatTimecode } from '../utils/duckingMath';
+import {
+  base64ToUint8,
+  exportEntriesToSrt,
+  formatTimecode,
+} from '../utils/duckingMath';
+import {
+  extractPcm16FromWav,
+  mergeTimedWavClipsToMasterWav,
+  triggerWavDownload,
+} from '../utils/timedScript';
 
 interface TranscriptLogViewProps {
   entries: TranscriptEntry[];
+  downloadingEntryId: string | null;
   onReplayEntry: (entry: TranscriptEntry) => void;
+  onDownloadEntryAudio: (entry: TranscriptEntry) => Promise<void>;
   onClearEntries: () => void;
   onJumpToConsole: () => void;
 }
 
 export function TranscriptLogView({
   entries,
+  downloadingEntryId,
   onReplayEntry,
+  onDownloadEntryAudio,
   onClearEntries,
   onJumpToConsole,
 }: TranscriptLogViewProps) {
@@ -67,52 +80,105 @@ export function TranscriptLogView({
     downloadFile(text, 'dubcast_transcript.txt', 'text/plain;charset=utf-8');
   };
 
+  const savedAudioEntries = useMemo(
+    () => filtered.filter((e) => Boolean(e.audioBase64Wav)),
+    [filtered],
+  );
+
+  const handleExportAllWav = () => {
+    if (savedAudioEntries.length === 0) return;
+    // Arrange chronologically (oldest first) with 350ms broadcast pause between segments
+    const chronological = [...savedAudioEntries].reverse();
+    const clips: Array<{ startMs: number; wavBase64: string }> = [];
+    let cursorMs = 0;
+    for (const entry of chronological) {
+      if (!entry.audioBase64Wav) continue;
+      const wavBytes = base64ToUint8(entry.audioBase64Wav);
+      const parsed = extractPcm16FromWav(wavBytes);
+      if (!parsed || parsed.samples.length === 0) continue;
+      clips.push({ startMs: cursorMs, wavBase64: entry.audioBase64Wav });
+      const durationMs = Math.round(
+        (parsed.samples.length / parsed.sampleRate) * 1000,
+      );
+      cursorMs += durationMs + 350;
+    }
+    const masterWav = mergeTimedWavClipsToMasterWav(clips, 24000);
+    if (masterWav) {
+      triggerWavDownload(masterWav, 'dubcast_history_audio.wav');
+    }
+  };
+
   return (
     <div className="bg-[#121620] border border-white/[0.08] rounded-lg">
       {/* Toolbar */}
-      <div className="p-5 border-b border-white/[0.06] flex flex-col md:flex-row md:items-center justify-between gap-3">
-        <div>
+      <div className="p-5 border-b border-white/[0.06] flex flex-col gap-3.5">
+        <div className="flex flex-wrap items-baseline justify-between gap-2">
           <h2 className="text-base font-semibold text-[#F1F5F9]">
             Журнал переведённых реплик эфира
           </h2>
-          <p className="text-xs text-[#8B95A7] mt-0.5">
-            Всего записей: <span className="font-mono tabular-nums">{entries.length}</span> · Показано:{' '}
-            <span className="font-mono tabular-nums">{filtered.length}</span>
+          <p className="text-xs text-[#8B95A7] whitespace-nowrap">
+            Всего записей:{' '}
+            <span className="font-mono tabular-nums text-[#E6ECF5]">{entries.length}</span> ·
+            Показано:{' '}
+            <span className="font-mono tabular-nums text-[#E6ECF5]">{filtered.length}</span> ·
+            Сохранено аудио WAV:{' '}
+            <span className="font-mono tabular-nums text-[#34D399]">
+              {savedAudioEntries.length}
+            </span>
           </p>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
-          <div className="relative">
-            <Search className="w-3.5 h-3.5 text-[#64748B] absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-            <label htmlFor="log-search-input" className="sr-only">
-              Поиск по журналу переводов
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="relative">
+              <Search className="w-3.5 h-3.5 text-[#64748B] absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <label htmlFor="log-search-input" className="sr-only">
+                Поиск по журналу переводов
+              </label>
+              <input
+                id="log-search-input"
+                type="search"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Поиск по тексту…"
+                className="bg-[#0B0E14] border border-white/[0.1] rounded-md pl-8 pr-3 py-1.5 text-xs text-[#F1F5F9] placeholder:text-[#64748B] w-56 focus:outline-none focus:border-[#E11D48]"
+              />
+            </div>
+
+            <label htmlFor="log-voice-filter" className="sr-only">
+              Фильтр по голосу
             </label>
-            <input
-              id="log-search-input"
-              type="search"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Поиск по тексту…"
-              className="bg-[#0B0E14] border border-white/[0.1] rounded-md pl-8 pr-3 py-1.5 text-xs text-[#F1F5F9] placeholder:text-[#64748B] w-48 focus:outline-none focus:border-[#E11D48]"
-            />
+            <select
+              id="log-voice-filter"
+              value={voiceFilter}
+              onChange={(e) => setVoiceFilter(e.target.value)}
+              className="bg-[#0B0E14] border border-white/[0.1] rounded-md px-2.5 py-1.5 text-xs text-[#F1F5F9]"
+            >
+              <option value="all">Все голоса</option>
+              {voicesInLog.map((v) => (
+                <option key={v} value={v}>
+                  {v}
+                </option>
+              ))}
+            </select>
           </div>
 
-          <label htmlFor="log-voice-filter" className="sr-only">
-            Фильтр по голосу
-          </label>
-          <select
-            id="log-voice-filter"
-            value={voiceFilter}
-            onChange={(e) => setVoiceFilter(e.target.value)}
-            className="bg-[#0B0E14] border border-white/[0.1] rounded-md px-2.5 py-1.5 text-xs text-[#F1F5F9]"
+          <div className="flex flex-wrap items-center gap-2">
+
+          <button
+            type="button"
+            onClick={handleExportAllWav}
+            disabled={savedAudioEntries.length === 0}
+            title={
+              savedAudioEntries.length === 0
+                ? 'Озвучьте реплику, чтобы скачать объединённый WAV'
+                : `Скачать объединённый WAV (${savedAudioEntries.length} записей)`
+            }
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-[#1C2230] hover:bg-[#252D40] text-[#E6ECF5] border border-white/[0.08] disabled:opacity-40 whitespace-nowrap"
           >
-            <option value="all">Все голоса</option>
-            {voicesInLog.map((v) => (
-              <option key={v} value={v}>
-                {v}
-              </option>
-            ))}
-          </select>
+            <FileAudio className="w-3.5 h-3.5" />
+            Экспорт .WAV
+          </button>
 
           <button
             type="button"
@@ -143,6 +209,7 @@ export function TranscriptLogView({
             <Trash2 className="w-3.5 h-3.5" />
             Очистить
           </button>
+          </div>
         </div>
       </div>
 
@@ -190,48 +257,72 @@ export function TranscriptLogView({
                 <th className="py-3 px-4">Перевод (озвучено)</th>
                 <th className="py-3 px-4 w-44">Модель / Голос</th>
                 <th className="py-3 px-4 w-28 text-right">Задержка</th>
-                <th className="py-3 px-4 w-28 text-right">Действие</th>
+                <th className="py-3 px-4 w-56 text-right">Действие</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-white/[0.05] text-xs">
-              {filtered.map((entry, idx) => (
-                <tr
-                  key={entry.id}
-                  className="hover:bg-white/[0.02] transition-colors align-top"
-                >
-                  <td className="py-3.5 px-4 font-mono tabular-nums text-[#94A3B8] whitespace-nowrap">
-                    {formatTimecode(entry.timestamp)}
-                  </td>
-                  <td className="py-3.5 px-4 text-[#94A3B8] max-w-xs leading-relaxed">
-                    {entry.originalText}
-                  </td>
-                  <td className="py-3.5 px-4 text-[#F8FAFC] font-medium max-w-md leading-relaxed">
-                    {entry.translatedText}
-                  </td>
-                  <td className="py-3.5 px-4 text-[#94A3B8] whitespace-nowrap">
-                    <div className="text-[#E6ECF5] font-medium">
-                      {entry.voiceName}
-                    </div>
-                    <div className="text-[11px] font-mono text-[#64748B]">
-                      {entry.ttsModel}
-                    </div>
-                  </td>
-                  <td className="py-3.5 px-4 font-mono tabular-nums text-right text-[#CBD5E1] whitespace-nowrap">
-                    {entry.translateMs + entry.ttsMs} мс
-                  </td>
-                  <td className="py-3.5 px-4 text-right whitespace-nowrap">
-                    <button
-                      type="button"
-                      onClick={() => onReplayEntry(entry)}
-                      aria-label={`Повторить озвучку записи ${idx + 1}`}
-                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded bg-[#1C2230] hover:bg-[#252D40] text-[#E6ECF5] transition-colors"
-                    >
-                      <Play className="w-3 h-3" />
-                      <span>Озвучить</span>
-                    </button>
-                  </td>
-                </tr>
-              ))}
+              {filtered.map((entry, idx) => {
+                const isDownloading = downloadingEntryId === entry.id;
+                return (
+                  <tr
+                    key={entry.id}
+                    className="hover:bg-white/[0.02] transition-colors align-top"
+                  >
+                    <td className="py-3.5 px-4 font-mono tabular-nums text-[#94A3B8] whitespace-nowrap">
+                      {formatTimecode(entry.timestamp)}
+                    </td>
+                    <td className="py-3.5 px-4 text-[#94A3B8] max-w-xs leading-relaxed">
+                      {entry.originalText}
+                    </td>
+                    <td className="py-3.5 px-4 text-[#F8FAFC] font-medium max-w-md leading-relaxed">
+                      {entry.translatedText}
+                    </td>
+                    <td className="py-3.5 px-4 text-[#94A3B8] whitespace-nowrap">
+                      <div className="text-[#E6ECF5] font-medium">
+                        {entry.voiceName}
+                      </div>
+                      <div className="text-[11px] font-mono text-[#64748B]">
+                        {entry.ttsModel}
+                      </div>
+                    </td>
+                    <td className="py-3.5 px-4 font-mono tabular-nums text-right text-[#CBD5E1] whitespace-nowrap">
+                      {entry.translateMs + entry.ttsMs} мс
+                    </td>
+                    <td className="py-3.5 px-4 text-right whitespace-nowrap">
+                      <div className="inline-flex items-center justify-end gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => onReplayEntry(entry)}
+                          aria-label={`Повторить озвучку записи ${idx + 1}`}
+                          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded bg-[#1C2230] hover:bg-[#252D40] text-[#E6ECF5] transition-colors"
+                        >
+                          <Play className="w-3 h-3" />
+                          <span>Озвучить</span>
+                        </button>
+                        <button
+                          type="button"
+                          disabled={isDownloading}
+                          onClick={() => void onDownloadEntryAudio(entry)}
+                          aria-label={`Скачать WAV аудио записи ${idx + 1}`}
+                          title={
+                            entry.audioBase64Wav
+                              ? 'Скачать готовый WAV-файл'
+                              : 'Сгенерировать и скачать WAV-файл'
+                          }
+                          className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded border transition-colors disabled:opacity-50 ${
+                            entry.audioBase64Wav
+                              ? 'bg-[#13221D] border-[#34D399]/30 text-[#6EE7B7] hover:bg-[#193028]'
+                              : 'bg-[#0B0E14] border-white/[0.1] text-[#CBD5E1] hover:bg-[#1C2230]'
+                          }`}
+                        >
+                          <Download className="w-3 h-3" />
+                          <span>{isDownloading ? 'Синтез…' : 'Скачать WAV'}</span>
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>

@@ -49,6 +49,13 @@ import {
   ObsWebSocketClient,
   type ObsConnectionState,
 } from './utils/obsWebSocket';
+import { formatTimecode } from './utils/duckingMath';
+import {
+  pcmChunksToWavBase64,
+  triggerWavDownload,
+  type TimedCue,
+} from './utils/timedScript';
+import type { TimedCueSynthResult } from './components/TimedScriptPanel';
 
 type LivePipelineMode = 'flash_tts' | 'live_realtime' | 'live_s2s';
 
@@ -121,6 +128,9 @@ function StudioConsoleApp() {
 
   // Broadcast history
   const [entries, setEntries] = useState<TranscriptEntry[]>(INITIAL_DEMO_LOG);
+  const [downloadingEntryId, setDownloadingEntryId] = useState<string | null>(
+    null,
+  );
 
   // OBS Plugin state
   const [overlayConfig, setOverlayConfig] = useState<ObsOverlayConfig>(
@@ -726,6 +736,7 @@ function StudioConsoleApp() {
           const reader = ttsRes.body.getReader();
           const decoder = new TextDecoder();
           let buffer = '';
+          const pcmChunks: string[] = [];
 
           while (true) {
             const { value, done } = await reader.read();
@@ -741,6 +752,7 @@ function StudioConsoleApp() {
               if (!dataLine) continue;
               const event = JSON.parse(dataLine.slice(6));
               if (event.type === 'pcm' && event.data) {
+                pcmChunks.push(event.data);
                 engineRef.current?.enqueuePcm24kBase64(event.data);
                 // Stream 24kHz PCM chunk directly to OBS Browser Source so OBS Mixer receives audio!
                 broadcastToObsOverlay(
@@ -759,6 +771,10 @@ function StudioConsoleApp() {
                 throw new Error(event.error || 'Ошибка потокового TTS');
               }
             }
+          }
+
+          if (pcmChunks.length > 0) {
+            audioBase64Wav = pcmChunksToWavBase64(pcmChunks, 24000);
           }
         } else {
           const ttsRes = await fetch('/api/tts', {
@@ -1058,6 +1074,193 @@ function StudioConsoleApp() {
       setProcessingStage('');
     }
   };
+
+  // Download generated WAV audio for a transcript log entry (synthesizes & caches if not yet saved)
+  const handleDownloadEntryAudio = async (entry: TranscriptEntry) => {
+    setErrorBanner('');
+    const safeTime = formatTimecode(entry.timestamp).replace(/:/g, '-');
+    const filename = `dubcast_${safeTime}_${entry.voiceName.toLowerCase()}.wav`;
+
+    if (entry.audioBase64Wav) {
+      triggerWavDownload(entry.audioBase64Wav, filename);
+      return;
+    }
+
+    setDownloadingEntryId(entry.id);
+    try {
+      const ttsRes = await fetch('/api/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: entry.translatedText,
+          voiceName: entry.voiceName || voiceName,
+          voiceStyle: entry.voiceStyle || voiceStyle,
+          ttsModel: entry.ttsModel || ttsModel,
+        }),
+      });
+      const data = await ttsRes.json();
+      if (!ttsRes.ok || !data.audioBase64Wav) {
+        throw new Error(data.error || 'Не удалось сгенерировать WAV-файл.');
+      }
+
+      const wav: string = data.audioBase64Wav;
+      setEntries((prev) =>
+        prev.map((e) => (e.id === entry.id ? { ...e, audioBase64Wav: wav } : e)),
+      );
+      triggerWavDownload(wav, filename);
+    } catch (err) {
+      setErrorBanner(
+        err instanceof Error ? err.message : 'Не удалось скачать аудиофайл.',
+      );
+    } finally {
+      setDownloadingEntryId(null);
+    }
+  };
+
+  // Synthesize a single timestamp-stripped cue for TimedScriptPanel (optional translation + WAV)
+  const handleSynthesizeTimedCue = useCallback(
+    async (
+      cleanText: string,
+      shouldTranslate: boolean,
+    ): Promise<TimedCueSynthResult> => {
+      const {
+        sourceLang: curSrc,
+        targetLang: curTgt,
+        voiceName: curVoice,
+        ttsModel: curModel,
+        voiceStyle: curStyle,
+        localModelConfig: curLocal,
+      } = latestStateRef.current;
+
+      let spokenText = cleanText;
+      let translateMs = 0;
+      let translatorLabel = 'Тайминг (прямо)';
+
+      if (shouldTranslate) {
+        const runGeminiTr = async () => {
+          const trRes = await fetch('/api/translate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              text: cleanText,
+              sourceLang: curSrc,
+              targetLang: curTgt,
+            }),
+          });
+          const trData = await trRes.json();
+          if (!trRes.ok) {
+            throw new Error(trData.error || 'Ошибка перевода реплики');
+          }
+          return {
+            translatedText: String(trData.translatedText),
+            translateMs: Number(trData.translateMs || 0),
+          };
+        };
+
+        if (curLocal.provider === 'local') {
+          try {
+            const localRes = await translateWithLocalModel(
+              cleanText,
+              curSrc,
+              curTgt,
+              curLocal,
+            );
+            spokenText = localRes.translatedText;
+            translateMs = localRes.translateMs;
+            translatorLabel = `Local: ${curLocal.modelName}`;
+          } catch (localErr) {
+            if (!curLocal.fallbackToGemini) throw localErr;
+            const fallback = await runGeminiTr();
+            spokenText = fallback.translatedText;
+            translateMs = fallback.translateMs;
+            translatorLabel = 'Gemini (резерв)';
+          }
+        } else {
+          const gem = await runGeminiTr();
+          spokenText = gem.translatedText;
+          translateMs = gem.translateMs;
+          translatorLabel = 'Gemini 3.1';
+        }
+      }
+
+      const ttsRes = await fetch('/api/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: spokenText,
+          voiceName: curVoice,
+          voiceStyle: curStyle,
+          ttsModel: curModel,
+        }),
+      });
+      const ttsData = await ttsRes.json();
+      if (!ttsRes.ok || !ttsData.audioBase64Wav) {
+        throw new Error(ttsData.error || 'Ошибка синтеза речи для тайминга');
+      }
+
+      return {
+        originalText: cleanText,
+        spokenText,
+        audioBase64Wav: ttsData.audioBase64Wav,
+        translateMs,
+        ttsMs: Number(ttsData.ttsMs || 0),
+        translatorLabel,
+      };
+    },
+    [translateWithLocalModel],
+  );
+
+  // Triggered at exact timestamp by TimedScriptPanel master clock
+  const handlePlayTimedCue = useCallback(
+    (cue: TimedCue, synth: TimedCueSynthResult) => {
+      const {
+        sourceLang: curSrc,
+        targetLang: curTgt,
+        voiceName: curVoice,
+        ttsModel: curModel,
+        voiceStyle: curStyle,
+        duckingConfig: curDuck,
+      } = latestStateRef.current;
+
+      broadcastToObsOverlay({
+        type: 'subtitle',
+        originalText: synth.originalText,
+        translatedText: synth.spokenText,
+        timestamp: Date.now(),
+      });
+
+      broadcastToObsOverlay({
+        type: 'audio_wav',
+        originalText: synth.originalText,
+        translatedText: synth.spokenText,
+        audioBase64Wav: synth.audioBase64Wav,
+        ttsGainDb: curDuck.ttsGainDb,
+        timestamp: Date.now(),
+      });
+
+      void engineRef.current?.playWavBase64(synth.audioBase64Wav);
+
+      const logEntry: TranscriptEntry = {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        timestamp: Date.now(),
+        sourceLang: curSrc,
+        targetLang: curTgt,
+        originalText: `[${cue.timeLabel}] ${synth.originalText}`,
+        translatedText: synth.spokenText,
+        voiceName: curVoice,
+        ttsModel: curModel,
+        voiceStyle: curStyle,
+        translatorLabel: synth.translatorLabel
+          ? `${synth.translatorLabel} · ${cue.timeLabel}`
+          : `Тайминг ${cue.timeLabel}`,
+        translateMs: synth.translateMs,
+        ttsMs: synth.ttsMs,
+        audioBase64Wav: synth.audioBase64Wav,
+      };
+      setEntries((prev) => [logEntry, ...prev]);
+    },
+    [broadcastToObsOverlay],
+  );
 
   // OBS WebSocket v5 Connect / Disconnect / Test (supports both Browser Source Bridge & Direct mode)
   const handleConnectObsWs = async () => {
@@ -1417,7 +1620,7 @@ function StudioConsoleApp() {
             </div>
           )}
 
-          {activeTab === 'console' && (
+          <div className={activeTab === 'console' ? 'block' : 'hidden'}>
             <ConsoleView
               engine={engineRef.current!}
               isLive={isLive}
@@ -1448,6 +1651,8 @@ function StudioConsoleApp() {
               processingStage={processingStage}
               onTranslateAndSpeak={translateAndSpeak}
               onUploadAudioClip={handleUploadAudioClip}
+              onSynthesizeTimedCue={handleSynthesizeTimedCue}
+              onPlayTimedCue={handlePlayTimedCue}
               recentEntries={entries}
               onReplayEntry={(e) => void handleReplayEntry(e)}
               onStopAudio={() => {
@@ -1462,7 +1667,7 @@ function StudioConsoleApp() {
               onFetchLocalModels={handleFetchLocalModels}
               onTestLocalModel={handleTestLocalModel}
             />
-          )}
+          </div>
 
           {/* Keep CameraStudioView mounted so camera stream & 1 FPS Vision/OBS PiP stay alive across tabs */}
           <div className={activeTab === 'cameras' ? 'block' : 'hidden'}>
@@ -1506,7 +1711,9 @@ function StudioConsoleApp() {
           {activeTab === 'log' && (
             <TranscriptLogView
               entries={entries}
+              downloadingEntryId={downloadingEntryId}
               onReplayEntry={(e) => void handleReplayEntry(e)}
+              onDownloadEntryAudio={handleDownloadEntryAudio}
               onClearEntries={() => setEntries([])}
               onJumpToConsole={() => setActiveTab('console')}
             />

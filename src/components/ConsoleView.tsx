@@ -34,6 +34,11 @@ import type {
 } from '../types/translator';
 import { formatTimecode } from '../utils/duckingMath';
 import { LevelMeters } from './LevelMeters';
+import {
+  TimedScriptPanel,
+  type TimedCueSynthResult,
+} from './TimedScriptPanel';
+import type { TimedCue } from '../utils/timedScript';
 
 interface ConsoleViewProps {
   engine: BroadcastDuckingEngine;
@@ -61,6 +66,11 @@ interface ConsoleViewProps {
   processingStage: string;
   onTranslateAndSpeak: (text: string, overrideSourceLang?: string) => Promise<void>;
   onUploadAudioClip: (file: File) => Promise<void>;
+  onSynthesizeTimedCue: (
+    cleanText: string,
+    shouldTranslate: boolean,
+  ) => Promise<TimedCueSynthResult>;
+  onPlayTimedCue: (cue: TimedCue, synth: TimedCueSynthResult) => void;
   recentEntries: TranscriptEntry[];
   onReplayEntry: (entry: TranscriptEntry) => void;
   onStopAudio: () => void;
@@ -124,6 +134,8 @@ export function ConsoleView({
   processingStage,
   onTranslateAndSpeak,
   onUploadAudioClip,
+  onSynthesizeTimedCue,
+  onPlayTimedCue,
   recentEntries,
   onReplayEntry,
   onStopAudio,
@@ -134,6 +146,7 @@ export function ConsoleView({
   onFetchLocalModels,
   onTestLocalModel,
 }: ConsoleViewProps) {
+  const [composerTab, setComposerTab] = useState<'live' | 'timed'>('live');
   const [manualText, setManualText] = useState('');
   const [manualError, setManualError] = useState('');
   const [isTestingDsp, setIsTestingDsp] = useState(false);
@@ -425,123 +438,178 @@ export function ConsoleView({
             </div>
           </section>
 
-          {/* Live Speech Capture & Manual Dubbing Desk */}
+          {/* Live Speech Capture, Manual Dubbing & Timed Script Desk */}
           <section className="bg-[#121620] border border-white/[0.08] rounded-lg p-5">
-            <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+            <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
               <div>
                 <h2 className="text-sm font-semibold text-[#F1F5F9]">
-                  Живой захват речи и мгновенная озвучка
+                  {composerTab === 'live'
+                    ? 'Живой захват речи и мгновенная озвучка'
+                    : 'Чтение текста по таймингам'}
                 </h2>
                 <p className="text-xs text-[#8B95A7] mt-0.5">
-                  Говорите в микрофон или введите фразу — перевод сразу заглушит оригинал и пойдёт в OBS
+                  {composerTab === 'live'
+                    ? 'Говорите в микрофон или введите фразу — перевод сразу заглушит оригинал и пойдёт в OBS'
+                    : 'Строки озвучиваются ровно в указанное время — сами тайминги в речь не читаются'}
                 </p>
               </div>
-              <button
-                type="button"
-                onClick={onToggleLive}
-                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#E11D48] ${
-                  isLive
-                    ? 'bg-[#E11D48] text-white hover:bg-[#BE123C]'
-                    : 'bg-[#1C2230] text-[#E6ECF5] hover:bg-[#252D40] border border-white/[0.08]'
-                }`}
-              >
-                {isLive ? (
-                  <>
-                    <MicOff className="w-3.5 h-3.5" />
-                    Остановить микрофон
-                  </>
-                ) : (
-                  <>
-                    <Mic className="w-3.5 h-3.5" />
-                    Захват с микрофона
-                  </>
+              <div className="flex items-center gap-2">
+                <div
+                  role="tablist"
+                  aria-label="Режим ввода текста для озвучки"
+                  className="inline-flex p-0.5 bg-[#0B0E14] rounded-md border border-white/[0.08]"
+                >
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={composerTab === 'live'}
+                    onClick={() => setComposerTab('live')}
+                    className={`px-2.5 py-1.5 rounded text-xs font-medium transition-colors whitespace-nowrap ${
+                      composerTab === 'live'
+                        ? 'bg-[#1C2230] text-white'
+                        : 'text-[#8B95A7] hover:text-white'
+                    }`}
+                  >
+                    Реплика и микрофон
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={composerTab === 'timed'}
+                    onClick={() => setComposerTab('timed')}
+                    className={`px-2.5 py-1.5 rounded text-xs font-medium transition-colors whitespace-nowrap ${
+                      composerTab === 'timed'
+                        ? 'bg-[#1C2230] text-white'
+                        : 'text-[#8B95A7] hover:text-white'
+                    }`}
+                  >
+                    Текст по таймингам
+                  </button>
+                </div>
+
+                {composerTab === 'live' && (
+                  <button
+                    type="button"
+                    onClick={onToggleLive}
+                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#E11D48] ${
+                      isLive
+                        ? 'bg-[#E11D48] text-white hover:bg-[#BE123C]'
+                        : 'bg-[#1C2230] text-[#E6ECF5] hover:bg-[#252D40] border border-white/[0.08]'
+                    }`}
+                  >
+                    {isLive ? (
+                      <>
+                        <MicOff className="w-3.5 h-3.5" />
+                        Остановить микрофон
+                      </>
+                    ) : (
+                      <>
+                        <Mic className="w-3.5 h-3.5" />
+                        Захват с микрофона
+                      </>
+                    )}
+                  </button>
                 )}
-              </button>
+              </div>
             </div>
 
-            {/* Live Recognition Strip */}
-            {(isLive || interimTranscript || isProcessing) && (
-              <div className="mb-4 px-3.5 py-2.5 rounded-md bg-[#0B0E14] border border-white/[0.08] flex items-center justify-between gap-3">
-                <div className="min-w-0 flex-1">
-                  <div className="text-[11px] text-[#8B95A7] mb-0.5">
-                    {isProcessing
-                      ? processingStage
-                      : isLive
-                        ? 'Распознавание речи в реальном времени (Gemini 3.5 Live Transcribe)'
-                        : 'Последний распознанный фрагмент'}
+            <div className={composerTab === 'live' ? 'block' : 'hidden'}>
+              {/* Live Recognition Strip */}
+              {(isLive || interimTranscript || isProcessing) && (
+                <div className="mb-4 px-3.5 py-2.5 rounded-md bg-[#0B0E14] border border-white/[0.08] flex items-center justify-between gap-3">
+                  <div className="min-w-0 flex-1">
+                    <div className="text-[11px] text-[#8B95A7] mb-0.5">
+                      {isProcessing
+                        ? processingStage
+                        : isLive
+                          ? 'Распознавание речи в реальном времени (Gemini 3.5 Live Transcribe)'
+                          : 'Последний распознанный фрагмент'}
+                    </div>
+                    <p className="text-sm text-[#F1F5F9] truncate">
+                      {interimTranscript ||
+                        (isLive
+                          ? 'Слушаю входной канал… начните говорить'
+                          : processingStage)}
+                    </p>
                   </div>
-                  <p className="text-sm text-[#F1F5F9] truncate">
-                    {interimTranscript ||
-                      (isLive
-                        ? 'Слушаю входной канал… начните говорить'
-                        : processingStage)}
-                  </p>
+                  {isLive && (
+                    <span className="inline-flex items-center gap-1.5 text-xs font-mono text-[#FB7185] shrink-0">
+                      <span className="w-2 h-2 rounded-full bg-[#E11D48] animate-pulse" />
+                      REC
+                    </span>
+                  )}
                 </div>
-                {isLive && (
-                  <span className="inline-flex items-center gap-1.5 text-xs font-mono text-[#FB7185] shrink-0">
-                    <span className="w-2 h-2 rounded-full bg-[#E11D48] animate-pulse" />
-                    REC
+              )}
+
+              {/* Manual Phrase Input Form */}
+              <form onSubmit={handleManualSubmit} className="space-y-3" noValidate>
+                <div>
+                  <label htmlFor="manual-phrase-input" className="sr-only">
+                    Фраза для перевода и озвучки
+                  </label>
+                  <div className="flex flex-col sm:flex-row gap-2.5">
+                    <input
+                      id="manual-phrase-input"
+                      type="text"
+                      value={manualText}
+                      onChange={(e) => {
+                        setManualText(e.target.value);
+                        if (manualError) setManualError('');
+                      }}
+                      placeholder="Введите или вставьте реплику для живого перевода и озвучки…"
+                      className="flex-1 bg-[#0B0E14] border border-white/[0.1] rounded-md px-3.5 py-2.5 text-sm text-[#F1F5F9] placeholder:text-[#64748B] focus:outline-none focus:border-[#E11D48]"
+                    />
+                    <button
+                      type="submit"
+                      disabled={isProcessing}
+                      className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-md text-xs font-semibold bg-[#E11D48] hover:bg-[#BE123C] text-white transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
+                    >
+                      <Send className="w-3.5 h-3.5" />
+                      {isProcessing ? 'Синтез…' : 'Перевести и озвучить'}
+                    </button>
+                  </div>
+                  {manualError && (
+                    <p role="alert" className="mt-1.5 text-xs text-[#FB7185]">
+                      {manualError}
+                    </p>
+                  )}
+                </div>
+
+                {/* Quick Broadcast Sample Buttons */}
+                <div className="flex flex-wrap items-center gap-2 pt-1">
+                  <span className="text-xs text-[#64748B]">
+                    Примеры реплик:
                   </span>
-                )}
-              </div>
-            )}
-
-            {/* Manual Phrase Input Form */}
-            <form onSubmit={handleManualSubmit} className="space-y-3" noValidate>
-              <div>
-                <label htmlFor="manual-phrase-input" className="sr-only">
-                  Фраза для перевода и озвучки
-                </label>
-                <div className="flex flex-col sm:flex-row gap-2.5">
-                  <input
-                    id="manual-phrase-input"
-                    type="text"
-                    value={manualText}
-                    onChange={(e) => {
-                      setManualText(e.target.value);
-                      if (manualError) setManualError('');
-                    }}
-                    placeholder="Введите или вставьте реплику для живого перевода и озвучки…"
-                    className="flex-1 bg-[#0B0E14] border border-white/[0.1] rounded-md px-3.5 py-2.5 text-sm text-[#F1F5F9] placeholder:text-[#64748B] focus:outline-none focus:border-[#E11D48]"
-                  />
-                  <button
-                    type="submit"
-                    disabled={isProcessing}
-                    className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-md text-xs font-semibold bg-[#E11D48] hover:bg-[#BE123C] text-white transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
-                  >
-                    <Send className="w-3.5 h-3.5" />
-                    {isProcessing ? 'Синтез…' : 'Перевести и озвучить'}
-                  </button>
+                  {SAMPLE_BROADCAST_PHRASES.map((sample) => (
+                    <button
+                      key={sample.label}
+                      type="button"
+                      disabled={isProcessing}
+                      onClick={() => {
+                        setManualText(sample.text);
+                        setManualError('');
+                        void onTranslateAndSpeak(sample.text, sample.sourceLang);
+                      }}
+                      className="px-2.5 py-1 rounded text-xs text-[#CBD5E1] bg-[#1C2230] hover:bg-[#252D40] border border-white/[0.06] transition-colors whitespace-nowrap disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#E11D48]"
+                    >
+                      {sample.label}
+                    </button>
+                  ))}
                 </div>
-                {manualError && (
-                  <p role="alert" className="mt-1.5 text-xs text-[#FB7185]">
-                    {manualError}
-                  </p>
-                )}
-              </div>
+              </form>
+            </div>
 
-              {/* Quick Broadcast Sample Buttons */}
-              <div className="flex flex-wrap items-center gap-2 pt-1">
-                <span className="text-xs text-[#64748B]">
-                  Примеры реплик:
-                </span>
-                {SAMPLE_BROADCAST_PHRASES.map((sample) => (
-                  <button
-                    key={sample.label}
-                    type="button"
-                    disabled={isProcessing}
-                    onClick={() => {
-                      setManualText(sample.text);
-                      setManualError('');
-                      void onTranslateAndSpeak(sample.text, sample.sourceLang);
-                    }}
-                    className="px-2.5 py-1 rounded text-xs text-[#CBD5E1] bg-[#1C2230] hover:bg-[#252D40] border border-white/[0.06] transition-colors whitespace-nowrap disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#E11D48]"
-                  >
-                    {sample.label}
-                  </button>
-                ))}
-              </div>
-            </form>
+            <div className={composerTab === 'timed' ? 'block' : 'hidden'}>
+              <TimedScriptPanel
+                onSynthesizeCue={onSynthesizeTimedCue}
+                onPlayTimedCue={onPlayTimedCue}
+                onStopAudio={onStopAudio}
+                voiceName={voiceName}
+                ttsModel={ttsModel}
+                voiceStyle={voiceStyle}
+                targetLang={targetLang}
+              />
+            </div>
           </section>
         </div>
 
